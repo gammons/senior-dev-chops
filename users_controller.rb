@@ -375,44 +375,59 @@ class UsersController < ApplicationController
     render json: {value: honeypot_value, challenge: challenge_value}
   end
 
+  def get_user_from_request
+    if request.put?
+      EmailToken.confirm(params[:token])
+    else
+      EmailToken.confirmable(params[:token]).try(:user)
+    end
+  end
+
+  def get_user_from_token
+    @invalid_token = true and return unless EmailToken.valid_token_format?(params[:token])
+
+    @user = get_user_from_request
+
+    if @user
+      session["password-#{params[:token]}"] = @user.id
+    else
+      user_id = session["password-#{params[:token]}"]
+      @user = User.find(user_id) if user_id
+    end
+  end
+
+  def reset_user_password
+    @user.password = params[:password]
+    @user.password_required!
+    @user.auth_token = nil
+    if @user.save
+      Invite.invalidate_for_email(@user.email) # invite link can't be used to log in anymore
+      session["password-#{params[:token]}"] = nil
+      logon_after_password_reset
+    end
+  end
+
+  def invalid_password?
+    params[:password].blank? || params[:password].length > User.max_password_length
+  end
+
+  def handle_password_put_request
+    if invalid_password?
+      @user.errors.add(:password, :invalid)
+    else
+      reset_user_password
+    end
+  end
+
   def password_reset
     expires_now
 
-    if EmailToken.valid_token_format?(params[:token])
-      if request.put?
-        @user = EmailToken.confirm(params[:token])
-      else
-        email_token = EmailToken.confirmable(params[:token])
-        @user = email_token.try(:user)
-      end
-
-      if @user
-        session["password-#{params[:token]}"] = @user.id
-      else
-        user_id = session["password-#{params[:token]}"]
-        @user = User.find(user_id) if user_id
-      end
-    else
-      @invalid_token = true
-    end
+    get_user_from_token
 
     if !@user
       @error = I18n.t('password_reset.no_token')
     elsif request.put?
-      @invalid_password = params[:password].blank? || params[:password].length > User.max_password_length
-
-      if @invalid_password
-        @user.errors.add(:password, :invalid)
-      else
-        @user.password = params[:password]
-        @user.password_required!
-        @user.auth_token = nil
-        if @user.save
-          Invite.invalidate_for_email(@user.email) # invite link can't be used to log in anymore
-          session["password-#{params[:token]}"] = nil
-          logon_after_password_reset
-        end
-      end
+      handle_password_put_request
     end
     render layout: 'no_ember'
   end
